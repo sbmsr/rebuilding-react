@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>React Internals Playground</title>
+    <script type="text/javascript">
+        document.addEventListener('DOMContentLoaded', () => {
+            class Component {
+                #type; // h1, br, ...
+                #parent;
+                #children;
+                #content;
+
+                constructor(type, children, parent, content) {
+                    this.#type = type;
+                    this.#children = children;
+                    this.#parent = parent;
+                    this.#content = content;
+                }
+
+                get hash() {
+                    return `${this.#type}-${this.#children?.map(x => x.hash).join("-") ?? "null"}-${this.#content}`
+                }
+
+                get parent() {
+                    return this.#parent;
+                }
+
+                set parent(p) {
+                    this.#parent = p;
+                }
+                get type() {
+                    return this.#type;
+                }
+
+                get content() {
+                    return this.#content;
+                }
+
+                get children() {
+                    return this.#children;
+                }
+            }
+
+            class Renderer {
+                #root; // root dom node
+                #vdom; // vdom
+
+                constructor(root) {
+                    this.#root = root;
+                    // Create proxy to track vdom changes
+                    this.#vdom = new Proxy({}, {
+                        set: (target, property, value) => {
+                            let oldVal = target[property]
+                            target[property] = value;
+                            this.diffHandler(target, property, value, oldVal);
+                            return true;
+                        }
+                    });
+                }
+
+                diffHandler(target, property, value, oldVal) {
+                    console.log('target:', target); // target is this.#vdom
+                    console.log('property:', property); // property is key
+                    console.log('value:', value); // value is vdom element
+                    console.log('oldVal:', oldVal); // old el es undefined
+                    
+                    // Get parent element (either root or another component's DOM element)
+                    const parentEl = value.parent;
+                    
+                    // Create new DOM element for this component
+                    const newEl = document.createElement(value.type);
+                    if (value.content) {
+                        newEl.textContent = value.content;
+                    }
+
+                    // Check if an element with this hash already exists
+                    const existingEl = parentEl.querySelector(`[data-hash="${property}"]`);
+                    
+                    // Add data-hash attribute to track elements
+                    newEl.setAttribute('data-hash', property);
+
+                    if (existingEl) {
+                        // Replace existing element
+                        parentEl.replaceChild(newEl, existingEl);
+                    } else {
+                        // Append new element
+                        parentEl.appendChild(newEl);
+                    }
+                }
+
+                async addChild(child) {
+                    if (child.parent === null) {
+                        child.parent = this.#root;
+                    }
+                    this.#vdom[child.hash] = child;
+                }
+            }
+
+            let h1 = new Component("h1", null, null, "Hello World")
+            let root = document.getElementById("root")
+            let r = new Renderer(root);
+            r.addChild(h1);
+
+        });
+    </script>
+    </script>
+</head>
+<body>
+    <div id="root"> </div>
+</body>
+</html>

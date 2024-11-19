@@ -1,0 +1,48 @@
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <script>
+            addEventListener("DOMContentLoaded", () => {
+                let a = document.getElementById("a");
+                let b = document.getElementById("b");
+                let c = document.getElementById("c");
+                let ul = document.getElementById("ul");
+
+                a.addEventListener("click", () => console.log("a was clicked"))
+                b.addEventListener("click", () => console.log("b was clicked"))
+                c.addEventListener("click", () => console.log("c was clicked"))
+
+                ul.addEventListener("click", (el, event) => {
+                    console.log(`clicked ul`)
+                }, true)
+
+                let a2 = document.getElementById("a2");
+                let b2 = document.getElementById("b2");
+                let c2 = document.getElementById("c2");
+                let ul2 = document.getElementById("ul2");
+
+                a2.addEventListener("click", () => console.log("a was clicked"))
+                b2.addEventListener("click", () => console.log("b was clicked"))
+                c2.addEventListener("click", () => console.log("c was clicked"))
+
+                ul2.addEventListener("click", (el, event) => {
+                    console.log(`clicked ul`)
+                }, false)
+            });
+        </script>
+    </head>
+    <body>
+        <h3>ul click eventListener will run on capture</h3>
+        <ul id="ul">
+            <li id="a">a</li>
+            <li id="b">b</li>
+            <li id="c">c</li>
+        </ul>
+
+        <h3>ul click eventListener will run on bubble</h3>
+        <ul id="ul2">
+            <li id="a2">a</li>
+            <li id="b2">b</li>
+            <li id="c2">c</li>
+        </ul>
+    </body>
+</html>

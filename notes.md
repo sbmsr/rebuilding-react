@@ -37,12 +37,6 @@
         - Discuss potential performance pitfalls with context.
         - Explore techniques to optimize context usage.
 
-- RSC
-
-  - how does RSC work? is there a compiler or something? There must be right?
-    - could we write a RSC by hand? what does that look like?
-  - What is Hydration? How does it work?
-
 - JSX
   - how does JSX work?
   - what does it afford you? why was it built?
@@ -54,6 +48,13 @@
       - Dive into React.createElement and how elements are represented internally.
     - Virtual DOM Elements
       - Discuss the structure of virtual DOM elements and their properties.
+
+- RSC
+
+  - how does RSC work? is there a compiler or something? There must be right?
+    - could we write a RSC by hand? what does that look like?
+  - What is Hydration? How does it work?
+
 
 ### Chat GPT Suggested Topics
 
@@ -98,3 +99,10 @@
 # Theoretical Table of Contents
 
 ... TBD
+
+# vocabulary
+
+- flush
+- fiber
+- reconciliation
+- concurrent mode
