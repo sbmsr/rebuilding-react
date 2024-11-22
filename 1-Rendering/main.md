@@ -1900,13 +1900,15 @@ And with that, we return the lane (16), and have finally finished execution of `
   };
 ```
 
-React.render has officially finished execution. Oh my god. Amazing.
+React.render has officially finished execution, and the callback that executes our work has been dispatched. Oh my god. Amazing.
+
+## Rendering to the Screen
 
 Except our UI is still blank...
 
-As we saw, Render queues the work, and is fully async. The work is staged and ready to be processed, but hasn't been processed yet. This is where our MessageChannel breakpoint gets hit, and we see the work actually get done. If we hit play on the debugger...
+As we saw, Render queues the work, and is fully async. The work is now in-flight, but the changes haven't been applied to the dom yet. This is where our MessageChannel breakpoint gets hit, and we see the DOM changes occur. If we hit play on the debugger...
 
-## 3. Doing the Work
+## 3. Changing the DOM
 
 Bam. Our `performWorkUntilDeadline` breakpoint gets hit. It's time to (actually) render our Like Button component.
 
@@ -2013,3 +2015,469 @@ function flushWork(hasTimeRemaining, initialTime) {
   }
 }
 ```
+
+`flushWork` processes the next scheduled task by running the work loop while managing priority levels and work state flags. First, we update some global flags:
+
+```js
+isHostCallbackScheduled = false;
+```
+
+This indicates we're now processing the scheduled callback.
+
+```js
+if (isHostTimeoutScheduled) {
+  // We scheduled a timeout but it's no longer needed. Cancel it.
+  isHostTimeoutScheduled = false;
+  cancelHostTimeout();
+}
+```
+
+We check for scheduled timeouts. since we didn't schedule any timeouts, this is skipped.
+
+```js
+isPerformingWork = true;
+var previousPriorityLevel = currentPriorityLevel;
+```
+
+We set up the work environment by marking that we're now performing work, and store the current priorityLevel so that we can restore it later.
+
+```js
+try {
+  if (enableProfiling) {
+    // (seb) profiling code path ...
+  } else {
+    // No catch in prod code path.
+    return workLoop(hasTimeRemaining, initialTime);
+  }
+} finally {
+  currentTask = null;
+  currentPriorityLevel = previousPriorityLevel;
+  isPerformingWork = false;
+}
+```
+
+we now hit the main execution path. Since we are skipping dev checks, the profiling branch is ignored, and we enter the workLoop call.
+
+Let's dive into `workLoop` to see how tasks get processed:
+
+```js
+function workLoop(hasTimeRemaining, initialTime) {
+  var currentTime = initialTime;
+  advanceTimers(currentTime);
+  currentTask = peek(taskQueue);
+
+  while (currentTask !== null && !(enableSchedulerDebugging && isSchedulerPaused)) {
+    if (currentTask.expirationTime > currentTime && (!hasTimeRemaining || shouldYieldToHost())) {
+      // This currentTask hasn't expired, and we've reached the deadline.
+      break;
+    }
+
+    var callback = currentTask.callback;
+
+    if (typeof callback === "function") {
+      currentTask.callback = null;
+      currentPriorityLevel = currentTask.priorityLevel;
+      var didUserCallbackTimeout = currentTask.expirationTime <= currentTime;
+
+      var continuationCallback = callback(didUserCallbackTimeout);
+      currentTime = getCurrentTime();
+
+      if (typeof continuationCallback === "function") {
+        currentTask.callback = continuationCallback;
+      } else {
+        if (currentTask === peek(taskQueue)) {
+          pop(taskQueue);
+        }
+      }
+
+      advanceTimers(currentTime);
+    } else {
+      pop(taskQueue);
+    }
+
+    currentTask = peek(taskQueue);
+  }
+
+  // Return whether there's more work to do
+  if (currentTask !== null) {
+    return true;
+  } else {
+    var firstTimer = peek(timerQueue);
+
+    if (firstTimer !== null) {
+      requestHostTimeout(handleTimeout, firstTimer.startTime - currentTime);
+    }
+
+    return false;
+  }
+}
+```
+
+Let's break this down:
+
+```js
+var currentTime = initialTime;
+advanceTimers(currentTime);
+currentTask = peek(taskQueue);
+```
+
+We start by getting the current task from our task queue (remember, this is the minheap we created earlier).
+
+```js
+while (currentTask !== null && !(enableSchedulerDebugging && isSchedulerPaused)) {
+```
+
+We'll keep processing tasks as long as there are tasks and we're not paused for debugging.
+
+```js
+if (currentTask.expirationTime > currentTime && (!hasTimeRemaining || shouldYieldToHost())) {
+  // This currentTask hasn't expired, and we've reached the deadline.
+  break;
+}
+```
+
+If the task hasn't expired and we're out of time, we break out of the loop. This is React's way of being nice to the browser - if we've been blocking the main thread too long, we'll pause our work and let other stuff happen.
+
+```js
+var callback = currentTask.callback;
+
+if (typeof callback === 'function') {
+  currentTask.callback = null;
+  currentPriorityLevel = currentTask.priorityLevel;
+  var didUserCallbackTimeout = currentTask.expirationTime <= currentTime;
+
+  var continuationCallback = callback(didUserCallbackTimeout);
+  currentTime = getCurrentTime();
+```
+
+Here's where we actually execute our task's callback. Remember, this callback is `performConcurrentWorkOnRoot` - the function that will actually render our component.
+
+Before we dive in, let's see what else is done here.
+
+```js
+if (typeof continuationCallback === "function") {
+  currentTask.callback = continuationCallback;
+} else {
+  if (currentTask === peek(taskQueue)) {
+    pop(taskQueue);
+  }
+}
+```
+
+If the callback returns a function, we store it for later (this is how React handles work that needs to be continued). Otherwise, we remove the task from the queue.
+
+```js
+advanceTimers(currentTime);
+currentTask = peek(taskQueue);
+```
+
+We update any timers and get the next task.
+
+<details>
+    <summary>What are React's timers?</summary>
+
+React's timer system manages timers you may run in your code. Timers are stored in a min-heap queue ordered by their start time. When a timer's time arrives:
+
+- It gets moved from the timer queue to the task queue
+- The task then executes normally through the scheduler
+
+Things that would go in the timer queue include
+
+1. Delayed state updates (like setTimeout/setInterval in React code)
+2. Suspense timeouts for loading states
+3. Transition delays and timeouts
+4. Auto-batching timeouts
+
+When we call advanceTimers, it checks the timerQueue (a min-heap) and processes any timers that have completed. Forach timer at the top of the heap, it:
+
+1. Removes cancelled timers (those with null callbacks) from the heap
+2. For timers that have reached/passed their start time:
+   - Removes them from the timerQueue heap
+   - Sets their sortIndex to their expiration time
+   - Adds them to the taskQueue heap
+3. Stops processing once it finds a timer that hasn't started yet
+
+This effectively moves any "ready" timers from the timer queue into the main task queue where they can be executed.
+
+```js
+function advanceTimers(currentTime) {
+  // Check for tasks that are no longer delayed and add them to the queue.
+  var timer = peek(timerQueue);
+
+  while (timer !== null) {
+    if (timer.callback === null) {
+      // Timer was cancelled.
+      pop(timerQueue);
+    } else if (timer.startTime <= currentTime) {
+      // Timer fired. Transfer to the task queue.
+      pop(timerQueue);
+      timer.sortIndex = timer.expirationTime;
+      push(taskQueue, timer);
+    } else {
+      // Remaining timers are pending.
+      return;
+    }
+
+    timer = peek(timerQueue);
+  }
+}
+```
+
+This two-queue system (timer queue + task queue) lets React efficiently handle both immediate and future work while maintaining proper scheduling priorities.
+
+</details>
+
+```js
+if (currentTask !== null) {
+  return true;
+} else {
+  var firstTimer = peek(timerQueue);
+
+  if (firstTimer !== null) {
+    requestHostTimeout(handleTimeout, firstTimer.startTime - currentTime);
+  }
+
+  return false;
+}
+```
+
+Finally, we return `true` if there's more work to do (remember, we're returning a boolean 2 calls back to set the variable `hasMoreWork` in `performWorkUntilDeadline`). 
+
+If there are no more immediate tasks but there are delayed tasks, we schedule a timeout to handle them later.
+
+In our case, the workLoop executed our `performConcurrentWorkOnRoot` callback, which will create and insert our Like Button into the DOM. Let's step in...
+
+```js
+function performConcurrentWorkOnRoot(root, didTimeout) {
+{
+  resetNestedUpdateFlag();
+}
+currentEventTime = NoTimestamp;
+currentEventTransitionLane = NoLanes;
+
+if ((executionContext & (RenderContext | CommitContext)) !== NoContext) {
+  throw new Error("Should not already be working.");
+}
+```
+
+In dev mode, we reset flags for nested updates (not relevant), and then clear event timing and lane information. 
+
+The if block ensures React isn't already in the middle of rendering or committing changes. If it is (meaning the executionContext has either RenderContext or CommitContext bits set), it throws an error since nested render/commit operations are not allowed.
+
+```js
+var originalCallbackNode = root.callbackNode;
+var didFlushPassiveEffects = flushPassiveEffects();
+
+if (didFlushPassiveEffects) {
+  if (root.callbackNode !== originalCallbackNode) {
+    return null;
+  }
+}
+```
+
+We store the current callback node for comparison, flush any pending passive effects (like useEffect callbacks), and if the callback node changed during this process, exit early as the task was cancelled. This isn't the case, so we can ignore this.
+
+```js
+var lanes = getNextLanes(root, root === workInProgressRoot ? workInProgressRootRenderLanes : NoLanes);
+
+if (lanes === NoLanes) {
+  return null;
+}
+```
+
+Here we determine the work to be done by getting the lane that needs processing (16 in this case). If there's no work to do (NoLanes), we exit early.
+
+```js
+var shouldTimeSlice = !includesBlockingLane(root, lanes) && !includesExpiredLane(root, lanes) && !didTimeout;
+
+var exitStatus = shouldTimeSlice ? renderRootConcurrent(root, lanes) : renderRootSync(root, lanes);
+```
+
+here we decide whether to use time-slicing (a concurrent mode feature) based on the absence of blocking updates (false, renders are blocking), absence of expired updates (true, no updates are expired), or if we have not timed out (true, we haven't timed out). Since includesBlockingLane returns true, shouldTimeSlice will be false and we'll use synchronous rendering, i.e. `renderRootSync`.
+
+'<details>
+<summary>Time Slicing in React</summary>
+
+Time slicing is a key concurrent rendering feature in React that allows long rendering work to be split into smaller chunks. Here's how it works:
+
+1. **Breaking Up Work**
+   - React splits rendering work into small units
+   - Each unit can be paused if needed
+   - This prevents blocking the main thread for too long
+
+2. **Priority Levels**
+   - Different updates get different priority lanes
+   - High priority work (like user input) can interrupt lower priority work
+   - Work resumes once high priority updates complete
+
+3. **Benefits**
+   - Keeps app responsive during heavy updates
+   - Better user experience
+   - Main thread stays free for user interactions
+
+4. **Implementation**
+   - Uses `shouldTimeSlice` check we see above
+   - Concurrent mode required (`createRoot` vs `render`)
+   - Leverages browser's `requestIdleCallback` when available
+
+5. **When It's Used**
+   - Large screen updates
+   - Data visualization
+   - Complex animations
+   - Any CPU-intensive rendering
+
+Time slicing is part of React's larger concurrent features suite, working alongside Suspense and transitions to provide a smooth user experience.
+</details>
+
+
+```js
+function renderRootSync(root, lanes) {
+  var prevExecutionContext = executionContext;
+  executionContext |= RenderContext;
+  var prevDispatcher = pushDispatcher(); // If the root or lanes have changed, throw out the existing stack
+  // and prepare a fresh one. Otherwise we'll continue where we left off.
+```
+
+// TBD
+
+First, we store the current execution context (0) for later use. Then we add the RenderContext flag to the executionContext to indicate we're actively rendering, and we finally push a new dispatcher onto the stack (this controls how hooks work).
+
+```js
+if (workInProgressRoot !== root || workInProgressRootRenderLanes !== lanes) {
+  // ... dev tooling code ...
+  workInProgressTransitions = getTransitionsForLanes();
+  prepareFreshStack(root, lanes);
+}
+```
+
+If we're working on a new root or new set of lanes:
+
+- Handle any DevTools-related state
+- Get any transitions associated with these lanes
+- Prepare a fresh fiber stack for the new work
+
+The fiber stack is React's internal tree structure that tracks the component hierarchy and pending work.
+
+## 3. Perform the Work
+
+```js
+do {
+  try {
+    workLoopSync();
+    break;
+  } catch (thrownValue) {
+    handleError(root, thrownValue);
+  }
+} while (true);
+```
+
+The core work happens in a do-while loop that:
+
+- Calls `workLoopSync()` to process all work synchronously
+- Catches any errors and handles them via `handleError`
+- Continues until all work is complete or an unrecoverable error occurs
+
+## 4. Cleanup
+
+```js
+resetContextDependencies();
+executionContext = prevExecutionContext;
+popDispatcher(prevDispatcher);
+```
+
+After the work is done:
+
+- Reset any context dependencies
+- Restore the previous execution context
+- Pop the dispatcher we pushed earlier
+
+## 5. Validation and Completion
+
+```js
+if (workInProgress !== null) {
+  throw new Error("Cannot commit an incomplete root...");
+}
+
+workInProgressRoot = null;
+workInProgressRootRenderLanes = NoLanes;
+return workInProgressRootExitStatus;
+```
+
+Finally:
+
+- Verify the work completed (throw if not)
+- Clear the work in progress markers
+- Return the exit status
+
+The exit status tells the caller what happened:
+
+- Did the render complete successfully?
+- Did it error?
+- Was it interrupted?
+
+This synchronous render approach ensures the entire tree is processed in one go, unlike concurrent rendering which can be interrupted.
+
+With this completed, we return from `renderRootSync` and are back in `performConcurrentWorkOnRoot`, where we'll handle the render results, now store in `exitStatus`:
+
+```js
+if (exitStatus !== RootInProgress) {
+  if (exitStatus === RootErrored) {
+    // Handle errors by retrying synchronously
+    var errorRetryLanes = getLanesToRetrySynchronouslyOnError(root);
+    if (errorRetryLanes !== NoLanes) {
+      lanes = errorRetryLanes;
+      exitStatus = recoverFromConcurrentError(root, errorRetryLanes);
+    }
+  }
+
+  if (exitStatus === RootFatalErrored) {
+    // Handle fatal errors by throwing
+    var fatalError = workInProgressRootFatalError;
+    prepareFreshStack(root, NoLanes);
+    markRootSuspended$1(root, lanes);
+    ensureRootIsScheduled(root, now());
+    throw fatalError;
+  }
+
+  if (exitStatus === RootDidNotComplete) {
+    // Handle incomplete renders
+    markRootSuspended$1(root, lanes);
+  } else {
+    // Handle successful renders
+    var renderWasConcurrent = !includesBlockingLane(root, lanes);
+    var finishedWork = root.current.alternate;
+
+    // Check for store consistency if render was concurrent
+    if (renderWasConcurrent && !isRenderConsistentWithExternalStores(finishedWork)) {
+      // If stores are inconsistent, retry synchronously
+      exitStatus = renderRootSync(root, lanes);
+      // ... handle any errors from sync render ...
+    }
+
+    // Finalize the render
+    root.finishedWork = finishedWork;
+    root.finishedLanes = lanes;
+    finishConcurrentRender(root, exitStatus, lanes);
+  }
+}
+```
+
+This extensive error handling and completion logic ensures that:
+
+- Errors are caught and retried when possible
+- Fatal errors are properly propagated
+- Incomplete renders are marked appropriately
+- Successful renders are checked for consistency
+- The final render result is properly committed
+
+```js
+ensureRootIsScheduled(root, now());
+
+if (root.callbackNode === originalCallbackNode) {
+  return performConcurrentWorkOnRoot.bind(null, root);
+}
+
+return null;
+```
+
+We then proceed to schedule any necessary future updates. If this is still the current task, return a continuation, otherwise we return null to indicate completion.
